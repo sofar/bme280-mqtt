@@ -100,6 +100,7 @@ void measure_and_send() {
 
 void loop() {
 #if DEEPSLEEP != 1
+  measure_and_send();
   // go to sleep to preserve power
   delay(SLEEP_INTERVAL * 1e3);
 #endif
