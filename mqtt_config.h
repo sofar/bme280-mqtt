@@ -1,10 +1,10 @@
 
 // MQTT config parameters
 
-#define MQTT_BROKER "192.168.1.52"
+#define MQTT_BROKER "mqtt.lan"
 #define MQTT_PORT 1883
 
-#define MQTT_PREFIX "nodemcu-bme280"
+#define MQTT_PREFIX "ws-thp-v2"
 
 #define DISCOVERY_PREFIX "homeassistant"
 

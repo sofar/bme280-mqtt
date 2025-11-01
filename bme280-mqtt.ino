@@ -2,9 +2,12 @@
    Basic BME280 MQTT client -> publish sensor data to an MQTT server
 */
 
+//
+// This is using an esp8266 board!
+//
+
 // BME280
 #include <Wire.h>
-#include <SPI.h>
 #include <Adafruit_BME280.h>
 
 Adafruit_BME280 bme; // use I2C interface
@@ -20,6 +23,7 @@ const char* wifi_ssid = WIFI_SSID;
 const char* wifi_pass = WIFI_PASS;
 
 // MQTT
+#include <ArduinoJson.h>
 #include <ArduinoMqttClient.h>
 #include "mqtt_config.h"
 
@@ -37,6 +41,17 @@ String devID;
 
 int configAnnounce = 0;
 
+static long starttime = 0;
+void weekly_reset() {
+  if (starttime == 0)
+    starttime = millis();
+  else if ((millis() - starttime) > 1000 * 7 * 86400 + 4000 + random(4000)) { // slightly more than 1 week
+    Serial.println("Long term reset timer expired.");
+    delay(1000);
+    ESP.restart();
+  }
+}
+
 void setup() {
   // setup serial port
   Serial.begin(115200);
@@ -44,36 +59,37 @@ void setup() {
     delay(10);
 
   // setup sensor
-  Serial.println("BME280 MQTT Client startup.");
+  Serial.println("BME280 MQTT Client startup...");
 
-  // bme280 module directly soldered on nodemcu, at pins d6, d5, gnd, 3v3!
-  Wire.begin(D6, D5);
+  // bme280 module directly soldered on nodemcu, at pins d6(12), d5(14), gnd, 3v3!
+  Wire.begin(12, 14);
 
-  if (!bme.begin(0x76, &Wire)) {
-    Serial.println(F("Could not find a valid BME280 sensor, check wiring!"));
-    // fatal
-    while (1)
-      delay(1e6);
+  while (!bme.begin(0x76, &Wire)) {
+    Serial.println("Could not find a valid BME280 sensor, check wiring!");
+    delay(1e4);
   }
 
   Serial.println("BME280 Sensor ready");
+  bme_temp->printSensorDetails();
+  bme_pressure->printSensorDetails();
+  bme_humidity->printSensorDetails();
 
   // wifi
   WiFi.mode(WIFI_STA);
   WiFi.begin(wifi_ssid, wifi_pass);
   while (WiFi.status() != WL_CONNECTED) {
     // retry
-    delay(1000);
+    delay(1e3);
   }
 
   mac = WiFi.macAddress();
   devID = String(mqtt_prefix) + "-" + mac.substring(0,2) + mac.substring(3,5) + mac.substring(6,8)
             +mac.substring(9,11) + mac.substring(12,14) + mac.substring(15,17);
 
-  Serial.print("WiFi connected, IP address: ");
-  Serial.println(WiFi.localIP());
+  Serial.println("WiFi connected, IP address: " + WiFi.localIP().toString());
+  Serial.println("devID: " + devID);
 
-#if DEEPSLEEP == 1
+#if DEEPSLEEP
   measure_and_send();
   // allow mqtt to deliver message
   delay(5);
@@ -81,12 +97,25 @@ void setup() {
 #endif
 }
 
-void measure_and_send() {
+static const String configTopic(String sensortype)
+{
+  return String(DISCOVERY_PREFIX) + "/sensor/" + devID + "/" + sensortype + "/config";
+}
+
+static void mqttPublish(String topic, String msg)
+{
+  mqttClient.beginMessage(topic, (unsigned long)msg.length());
+  mqttClient.print(msg);
+  mqttClient.endMessage();
+}
+
+static void measure_and_send() {
   String msg;
-  String topic;
+  JsonDocument ctbl;
+  JsonDocument stbl;
   sensors_event_t temp_event, pressure_event, humidity_event;
 
-#if DEEPSLEEP != 1
+#if !DEEPSLEEP
   // If we're deep sleeping, we will just have setup the wifi, otherwise
   // force a wifi reconnect since we might be disconnected
   if (WiFi.status() != WL_CONNECTED)
@@ -103,76 +132,57 @@ void measure_and_send() {
   if (configAnnounce == 0) {
     Serial.println("Announcing autodiscovery configs...");
 
-    // temp config
-    topic = String(DISCOVERY_PREFIX) + "/sensor/" + devID + "/temperature" + "/config";
-    msg = String("{\"device_class\": \"temperature\", \"name\": \""
-                        + devID +
-                        " - Temperature\", \"unique_id\": \""
-                        + devID + 
-                        "-temperature\", \"state_topic\": \""
-                        + mqtt_status +
-                        "\", \"unit_of_measurement\": \"°C\", \"value_template\": \"{{ value_json.t}}\" }");
+    ctbl["state_topic"] = mqtt_status;
 
-    mqttClient.beginMessage(topic, (unsigned long)msg.length());
-    mqttClient.print(msg);
-    mqttClient.endMessage();
+    // temp config
+    ctbl["device_class"] = "temperature";
+    ctbl["name"] = devID + " - Temperature";
+    ctbl["unique_id"] = devID + "-temperature";
+    ctbl["unit_of_measurement"] = "°C";
+    ctbl["value_template"] = "{{ value_json.t}}";
+    serializeJson(ctbl, msg);
+    mqttPublish(configTopic("temperature"), msg);
 
     // humidity config
-    topic = String(DISCOVERY_PREFIX) + "/sensor/" + devID + "/humidity" + "/config";
-    msg = String("{\"device_class\": \"humidity\", \"name\": \""
-                        + devID +
-                        " - Humidity\", \"unique_id\": \""
-                        + devID + 
-                        "-humidity\", \"state_topic\": \""
-                        + mqtt_status +
-                        "\", \"unit_of_measurement\": \"%\", \"value_template\": \"{{ value_json.h}}\" }");
-
-    mqttClient.beginMessage(topic, (unsigned long)msg.length());
-    mqttClient.print(msg);
-    mqttClient.endMessage();
+    ctbl["device_class"] = "humidity";
+    ctbl["name"] = devID + " - Humidity";
+    ctbl["unique_id"] = devID + "-humidity";
+    ctbl["unit_of_measurement"] = "%";
+    ctbl["value_template"] = "{{ value_json.h}}";
+    serializeJson(ctbl, msg);
+    mqttPublish(configTopic("humidity"), msg);
 
     // pressure config
-    topic = String(DISCOVERY_PREFIX) + "/sensor/" + devID + "/pressure" + "/config";
-    msg = String("{\"device_class\": \"pressure\", \"name\": \""
-                        + devID +
-                        " - Pressure\", \"unique_id\": \""
-                        + devID + 
-                        "-pressure\", \"state_topic\": \""
-                        + mqtt_status +
-                        "\", \"unit_of_measurement\": \"hPa\", \"value_template\": \"{{ value_json.p}}\" }");
-
-    mqttClient.beginMessage(topic, (unsigned long)msg.length());
-    mqttClient.print(msg);
-    mqttClient.endMessage();
-  }
+    ctbl["device_class"] = "pressure";
+    ctbl["name"] = devID + " - Pressure";
+    ctbl["unique_id"] = devID + "-pressure";
+    ctbl["unit_of_measurement"] = "hPa";
+    ctbl["value_template"] = "{{ value_json.p}}";
+    serializeJson(ctbl, msg);
+    mqttPublish(configTopic("pressure"), msg);
+  };
 
   // only announce autodiscovery every CONFIG_ANNOUNCE_INTERVAL
   configAnnounce = (configAnnounce + 1) % CONFIG_ANNOUNCE_INTERVAL;
 
   // fetch sensor data
   bme_temp->getEvent(&temp_event);
-  bme_pressure->getEvent(&pressure_event);
   bme_humidity->getEvent(&humidity_event);
+  bme_pressure->getEvent(&pressure_event);
 
-  // actual status
-  msg = "{\"t\":\"" + String(temp_event.temperature) +
-               "\",\"h\":\"" + String(humidity_event.relative_humidity) +
-               "\",\"p\":\"" + String(pressure_event.pressure) +
-               "\"}";
+  // and send
+  stbl["t"] = String(temp_event.temperature);
+  stbl["h"] = String(humidity_event.relative_humidity);
+  stbl["p"] = String(pressure_event.pressure);
+  serializeJson(stbl, msg);
+  mqttPublish(mqtt_status, msg);
 
-  Serial.print(mqtt_status);
-  Serial.print(" -> ");
-  Serial.println(msg);
-  
-  mqttClient.beginMessage(mqtt_status, (unsigned long)msg.length());
-  mqttClient.print(msg);
-  mqttClient.endMessage();
-  // for some reason the mqttClient library has .disconnect() as private
+  Serial.println(mqtt_status + " -> " + msg);
 }
 
-
 void loop() {
-#if DEEPSLEEP != 1
+  weekly_reset();
+#if !DEEPSLEEP
   measure_and_send();
   // go to sleep to preserve power
   delay(SLEEP_INTERVAL * 1e3);
