@@ -124,10 +124,17 @@ static void measure_and_send() {
 
   // setup status topic for us in discovery data
   mqtt_status = "sensor/" + String(devID) + "/status";
-  // send MQTT autodiscover data
 
-  // hop online and send
-  mqttClient.connect(mqtt_broker, MQTT_PORT);
+  if (!mqttClient.connected()) {
+    Serial.println("Connecting to MQTT server...");
+    // The MQTT server will disconnect us after 1.5 * (conn_timeout) for a client
+    // connection, and this is a value we send to it when we connect to them for
+    // the first time. So we better make sure it is a bunch longer than the default
+    // library value, which is 30s.
+    mqttClient.setConnectionTimeout(SLEEP_INTERVAL * 1000L * 3L);
+    // hop online and send
+    mqttClient.connect(mqtt_broker, MQTT_PORT);
+  }
 
   if (configAnnounce == 0) {
     Serial.println("Announcing autodiscovery configs...");
