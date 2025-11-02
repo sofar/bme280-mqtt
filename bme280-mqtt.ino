@@ -113,7 +113,7 @@ static void measure_and_send() {
   String msg;
   JsonDocument ctbl;
   JsonDocument stbl;
-  sensors_event_t temp_event, pressure_event, humidity_event;
+  sensors_event_t t_event, p_event, h_event;
 
 #if !DEEPSLEEP
   // If we're deep sleeping, we will just have setup the wifi, otherwise
@@ -131,7 +131,9 @@ static void measure_and_send() {
     // connection, and this is a value we send to it when we connect to them for
     // the first time. So we better make sure it is a bunch longer than the default
     // library value, which is 30s.
+    mqttClient.setId(devID);
     mqttClient.setConnectionTimeout(SLEEP_INTERVAL * 1000L * 3L);
+    mqttClient.setKeepAliveInterval(60 * 1000L);
     // hop online and send
     mqttClient.connect(mqtt_broker, MQTT_PORT);
   }
@@ -173,14 +175,25 @@ static void measure_and_send() {
   configAnnounce = (configAnnounce + 1) % CONFIG_ANNOUNCE_INTERVAL;
 
   // fetch sensor data
-  bme_temp->getEvent(&temp_event);
-  bme_humidity->getEvent(&humidity_event);
-  bme_pressure->getEvent(&pressure_event);
+  bme_temp->getEvent(&t_event);
+  bme_humidity->getEvent(&h_event);
+  bme_pressure->getEvent(&p_event);
 
-  // and send
-  stbl["t"] = String(temp_event.temperature);
-  stbl["h"] = String(humidity_event.relative_humidity);
-  stbl["p"] = String(pressure_event.pressure);
+  // sanity check data - max ranges for the bme280:
+  if ((t_event.temperature < -40.) || (t_event.temperature > 85. ) ||
+      (h_event.relative_humidity < 0.5) || (h_event.relative_humidity > 99.5) ||
+      (p_event.pressure < 300.) || (p_event.pressure > 1100.)) {
+    stbl["error"] = String("Out of range");
+    Serial.println(t_event.temperature);
+    Serial.println(h_event.relative_humidity);
+    Serial.println(p_event.pressure);
+  } else {
+    // and send
+    stbl["t"] = String(t_event.temperature);
+    stbl["h"] = String(h_event.relative_humidity);
+    stbl["p"] = String(p_event.pressure);
+  }
+
   serializeJson(stbl, msg);
   mqttPublish(mqtt_status, msg);
 
@@ -188,10 +201,16 @@ static void measure_and_send() {
 }
 
 void loop() {
+  long d = 0;
   weekly_reset();
 #if !DEEPSLEEP
   measure_and_send();
-  // go to sleep to preserve power
-  delay(SLEEP_INTERVAL * 1e3);
+  while (d < SLEEP_INTERVAL * 1e3) {
+    // the mqtt client will dc if we don't do anything for 90s, so
+    // instead call the poll() method much more often
+    d += 1e3 * 30;
+    delay(1e3 * 30);
+    mqttClient.poll();
+  }
 #endif
 }
